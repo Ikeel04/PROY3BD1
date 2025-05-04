@@ -311,7 +311,7 @@ class ReservaApp:
                     horas_disponibles.append(current_time.strftime("%H:%M"))
                     current_time = (datetime.combine(datetime.today(), current_time) + timedelta(hours=1)).time()
             
-            self.hora_inicio_combobox["values"] = horas_disponibles
+            self.hora_inicio_combobox["values"] = hora_inicio
             self.hora_fin_combobox["values"] = hora_fin
             
         except Exception as e:
@@ -343,11 +343,13 @@ class ReservaApp:
             servicios_seleccionados = [self.servicios_listbox.get(i) for i in self.servicios_listbox.curselection()]
             servicios_ids = [int(s.split("(ID: ")[1].split(")")[0]) for s in servicios_seleccionados if "(ID:" in s]
             
-            query = """
-            INSERT INTO reserva (id_usuario, id_cancha, fecha, hora_inicio, hora_fin, duracion, estado)
-            VALUES (%s, %s, %s, %s, %s, '1.00','pendiente')
-            RETURNING id
-            """
+            query = "INSERT INTO reserva (id_usuario, id_cancha, fecha, hora_inicio, hora_fin, duracion, estado) VALUES (%s, %s, %s, %s, %s, '1.00','pendiente') RETURNING id"
+            
+            print(self.usuario_actual["id"])
+            print(cancha_id)
+            print(fecha)
+            print(hora_inicio)
+            print(hora_fin)
             self.cursor.execute(query, (
                 self.usuario_actual["id"],
                 cancha_id,
@@ -366,7 +368,7 @@ class ReservaApp:
            # query = "INSERT INTO pago (id_reserva) VALUES (%s)"
             #self.cursor.execute(query, (reserva_id,))
             
-            #self.conn.commit()
+            self.conn.commit()
            
            
            
