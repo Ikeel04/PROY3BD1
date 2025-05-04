@@ -1,489 +1,401 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkcalendar import DateEntry
 import psycopg2
 from datetime import datetime
 import csv
 from fpdf import FPDF
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from tkcalendar import DateEntry
 
-class ReportesEmpresaApp:
+class MergedReportApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Sistema de Reportes - Empresa")
+        self.root.title("Sistema Integrado de Reportes")
         self.root.geometry("1200x800")
-        
+
         # Conexión a la base de datos
         self.conn = psycopg2.connect(
             dbname="negroshima",
             user="postgres",
-            password="admin",
-            host="localhost"
+            password="0512",
+            host="localhost",
+            options='-c client_encoding=UTF8'
         )
+        self.conn.autocommit = True
         self.cursor = self.conn.cursor()
-        
-        self.crear_interfaz()
-    #Estructura copiada del otro archivo
-    def crear_interfaz(self):
-       
-        self.main_frame = ttk.Frame(self.root, padding="10")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
-    
-        self.notebook = ttk.Notebook(self.main_frame)
+
+        # Notebook principal
+        self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.reportes_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.reportes_frame, text="Reportes por fecha")
-        self.pest_rep()
+        # Pestañas combinadas
+        self.crear_reporte_por_fecha()
+        self.crear_pestaña_graficas()
+        self.crear_pestaña_sql()
+        self.crear_reporte_ingresos()
+        self.crear_reporte_servicios()
+        self.crear_reporte_por_usuario()
+        self.crear_reporte_duracion()
+        self.crear_reporte_comparativo_mensual()
 
-        self.graficos_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.graficos_frame, text="Graficas")
-        self.grafica()
+    # Helper genérico para pestañas con filtros + Treeview
+    def crear_pestana_base(self, titulo, columnas, anchuras):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text=titulo)
 
-        self.consultas_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.consultas_frame, text=" SQL")
-        self.consultas()
-    
-    def pest_rep(self):
+        filtros = ttk.LabelFrame(tab, text="Filtros", padding=8)
+        filtros.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
 
-        filtros_frame = ttk.LabelFrame(self.reportes_frame, text="Filtros", padding="10")
-        filtros_frame.pack(fill=tk.X, pady=5)
-        
-        ttk.Label(filtros_frame, text="Fecha inicial:").grid(row=0, column=0, padx=5, pady=5)
-        self.fecha_inicio = DateEntry(
-            filtros_frame, 
-            width=12, 
-            background='darkblue',
-            foreground='white', 
-            borderwidth=2,
-            date_pattern='yyyy-mm-dd'
+        resultado = ttk.LabelFrame(tab, text="Resultado", padding=8)
+        resultado.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        tree = ttk.Treeview(resultado, columns=columnas, show="headings")
+        for col, ancho in zip(columnas, anchuras):
+            tree.heading(col, text=col.replace("_"," ").title())
+            tree.column(col, width=ancho)
+        tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+
+        sb = ttk.Scrollbar(resultado, command=tree.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.configure(yscrollcommand=sb.set)
+
+        return filtros, tree
+
+    # 1. Reporte por fecha + export CSV/PDF
+    def crear_reporte_por_fecha(self):
+        filtros, tree = self.crear_pestana_base(
+            "Reportes por Fecha",
+            ["id","cancha","usuario","fecha","hora_inicio","hora_fin","duracion","estado","total"],
+            [50,150,150,100,80,80,80,100,100]
         )
-        self.fecha_inicio.grid(row=0, column=1, padx=5, pady=5)
-        
-        ttk.Label(filtros_frame, text="Fecha final:").grid(row=0, column=2, padx=5, pady=5)
-        self.fecha_fin = DateEntry(
-            filtros_frame, 
-            width=12, 
-            background='darkblue',
-            foreground='white', 
-            borderwidth=2,
-            date_pattern='yyyy-mm-dd'
-        )
-        self.fecha_fin.grid(row=0, column=3, padx=5, pady=5)
+        # Campos de filtro
+        ttk.Label(filtros, text="Fecha inicial:").grid(row=0, column=0, padx=5, pady=5)
+        self.rf_inicio = DateEntry(filtros, date_pattern='yyyy-mm-dd'); self.rf_inicio.grid(row=0, column=1)
+        ttk.Label(filtros, text="Fecha final:").grid(row=0, column=2, padx=5, pady=5)
+        self.rf_fin    = DateEntry(filtros, date_pattern='yyyy-mm-dd'); self.rf_fin.grid(row=0, column=3)
+        ttk.Label(filtros, text="Estado:").grid(row=0, column=4, padx=5, pady=5)
+        self.rf_estado = ttk.Combobox(filtros, values=["Todos","pendiente","confirmada","cancelada","completada"], state="readonly")
+        self.rf_estado.set("Todos"); self.rf_estado.grid(row=0, column=5)
 
-        ttk.Label(filtros_frame, text="Estado reserva:").grid(row=0, column=4, padx=5, pady=5)
-        self.estado_reserva = ttk.Combobox(
-            filtros_frame, 
-            values=["Todos", "pendiente", "confirmada", "cancelada", "completada"],
-            state="readonly"
-        )
-        self.estado_reserva.set("Todos")
-        self.estado_reserva.grid(row=0, column=5, padx=5, pady=5)
-        
+        ttk.Button(filtros, text="Generar", command=lambda: self._gen_rep_fecha(tree)).grid(row=0, column=6, padx=10)
+        # Export buttons
+        btn_frame = ttk.Frame(filtros); btn_frame.grid(row=1, column=0, columnspan=7, pady=5)
+        ttk.Button(btn_frame, text="Exportar CSV", command=lambda:self._export_csv(tree)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Exportar PDF", command=lambda:self._export_pdf(tree)).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(
-            filtros_frame, 
-            text="Generar Reporte", 
-            command=self.gen_rep
-        ).grid(row=0, column=6, padx=10, pady=5)
+        self.reportes_tree = tree
 
-        self.reportes_tree = ttk.Treeview(
-            self.reportes_frame,
-            columns=("id", "cancha", "usuario", "fecha", "hora_inicio", "hora_fin", "duracion", "estado", "total"),
-            show="headings"
-        )
-
-        columnas = [
-            ("id", "ID", 50),
-            ("cancha", "Cancha", 150),
-            ("usuario", "Usuario", 150),
-            ("fecha", "Fecha", 100),
-            ("hora_inicio", "Hora Inicio", 80),
-            ("hora_fin", "Hora Fin", 80),
-            ("duracion", "Duración", 80),
-            ("estado", "Estado", 100),
-            ("total", "Total", 100)
-        ]
-        
-        for col, text, width in columnas:
-            self.reportes_tree.heading(col, text=text)
-            self.reportes_tree.column(col, width=width)
-        
-
-        scrollbar = ttk.Scrollbar(self.reportes_frame, orient="vertical", command=self.reportes_tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.reportes_tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.reportes_tree.pack(fill=tk.BOTH, expand=True)
-
-        export_frame = ttk.Frame(self.reportes_frame)
-        export_frame.pack(side="right", padx=5, pady=5)
-        
-        # Botón de exportar a CSV
-        ttk.Button(
-            export_frame, 
-            text="Exportar a CSV", 
-            command=self.exportar_a_csv
-        ).pack(side="left", padx=5)
-        
-        # Botón de exportar a PDF
-        ttk.Button(
-            export_frame, 
-            text="Exportar a PDF", 
-            command=self.exportar_a_pdf
-        ).pack(side="left", padx=5)
-
-    def grafica(self):
-
-        opciones_frame = ttk.LabelFrame(self.graficos_frame, text="Opciones de Gráfico", padding="10")
-        opciones_frame.pack(fill=tk.X, pady=5)
-
-        ttk.Label(opciones_frame, text="Tipo de gráfico:").grid(row=0, column=0, padx=5, pady=5)
-        self.tipo_grafico = ttk.Combobox(
-            opciones_frame,
-            values=["Reservas por día", "Ingresos por cancha", "Uso de servicios", "Estado de reservas"],
-            state="readonly"
-        )
-        self.tipo_grafico.set("Reservas por día")
-        self.tipo_grafico.grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(opciones_frame, text="Fecha inicial:").grid(row=0, column=2, padx=5, pady=5)
-        self.grafico_fecha_inicio = DateEntry(
-            opciones_frame, 
-            width=12, 
-            background='darkblue',
-            foreground='white', 
-            borderwidth=2,
-            date_pattern='yyyy-mm-dd'
-        )
-        self.grafico_fecha_inicio.grid(row=0, column=3, padx=5, pady=5)
-        
-        ttk.Label(opciones_frame, text="Fecha final:").grid(row=0, column=4, padx=5, pady=5)
-        self.grafico_fecha_fin = DateEntry(
-            opciones_frame, 
-            width=12, 
-            background='darkblue',
-            foreground='white', 
-            borderwidth=2,
-            date_pattern='yyyy-mm-dd'
-        )
-        self.grafico_fecha_fin.grid(row=0, column=5, padx=5, pady=5)
-        
-        # Botón para generar gráfico
-        ttk.Button(
-            opciones_frame, 
-            text="Gráfica", 
-            command=self.generar_grafico
-        ).grid(row=0, column=6, padx=10, pady=5)
-
-        self.grafico_frame = ttk.Frame(self.graficos_frame)
-        self.grafico_frame.pack(fill=tk.BOTH, expand=True)
-    
-    def consultas(self):
-
-        consulta_frame = ttk.LabelFrame(self.consultas_frame, text="SQL", padding="10")
-        consulta_frame.pack(fill=tk.X, pady=5)
-
-        self.consulta_text = tk.Text(consulta_frame, height=5, width=80)
-        self.consulta_text.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Botones
-        btn_frame = ttk.Frame(consulta_frame)
-        btn_frame.pack(fill=tk.X)
-        
-        ttk.Button(
-            btn_frame, 
-            text="Consultar", 
-            command=self.ejecutar_consulta
-        ).pack(side="left", padx=5, pady=5)
-        
-        ttk.Button(
-            btn_frame, 
-            text="Limpiar", 
-            command=self.limpiar_consulta
-        ).pack(side="left", padx=5, pady=5)
-        
-        # Resultados
-        self.consulta_tree = ttk.Treeview(self.consultas_frame)
-        
-
-        scrollbar = ttk.Scrollbar(self.consultas_frame, orient="vertical", command=self.consulta_tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.consulta_tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.consulta_tree.pack(fill=tk.BOTH, expand=True)
-    
-    def gen_rep(self):
-
-        fecha_inicio = self.fecha_inicio.get_date()
-        fecha_fin = self.fecha_fin.get_date()
-        estado = self.estado_reserva.get()
-
-        query = """
-        SELECT 
-            r.id, 
-            c.nombre AS cancha, 
-            u.nombre AS usuario, 
-            r.fecha, 
-            r.hora_inicio, 
-            r.hora_fin, 
-            r.duracion, 
-            r.estado
-        FROM reserva r
-        JOIN cancha c ON r.id_cancha = c.id
-        JOIN usuario u ON r.id_usuario = u.id
-        WHERE r.fecha BETWEEN %s AND %s
+    def _gen_rep_fecha(self, tree):
+        f1, f2 = self.rf_inicio.get_date(), self.rf_fin.get_date()
+        estado = self.rf_estado.get()
+        q = """
+            SELECT r.id, c.nombre, u.nombre, r.fecha, r.hora_inicio, r.hora_fin, r.duracion, r.estado, COALESCE(p.total,0)
+            FROM reserva r
+            JOIN cancha c ON r.id_cancha = c.id
+            JOIN usuario u ON r.id_usuario = u.id
+            LEFT JOIN pago p ON p.id_reserva = r.id
+            WHERE r.fecha BETWEEN %s AND %s
         """
-        
-        params = [fecha_inicio, fecha_fin]
-        
-        if estado != "Todos":
-            query += " AND r.estado = %s"
-            params.append(estado)
-        
-        query += " ORDER BY r.fecha, r.hora_inicio"
-        
+        params = [f1, f2]
+        if estado!="Todos":
+            q += " AND r.estado=%s"; params.append(estado)
+        q += " ORDER BY r.fecha, r.hora_inicio"
+        self.cursor.execute(q, params)
+        datos = self.cursor.fetchall()
+        for iid in tree.get_children(): tree.delete(iid)
+        for row in datos: tree.insert("",tk.END,values=row)
+
+    def _export_csv(self, tree):
+        items = tree.get_children()
+        if not items:
+            messagebox.showwarning("Atención","No hay datos")
+            return
+        fp = filedialog.asksaveasfilename(defaultextension=".csv",filetypes=[("CSV","*.csv")])
+        if not fp: return
+        with open(fp,"w",newline="",encoding="utf-8") as f:
+            w = csv.writer(f)
+            headers = [tree.heading(c)["text"] for c in tree["columns"]]
+            w.writerow(headers)
+            for iid in items:
+                w.writerow(tree.item(iid)["values"])
+        messagebox.showinfo("Éxito",f"Guardado en {fp}")
+
+    def _export_pdf(self, tree):
+        items = tree.get_children()
+        if not items:
+            messagebox.showwarning("Atención","No hay datos")
+            return
+        fp = filedialog.asksaveasfilename(defaultextension=".pdf",filetypes=[("PDF","*.pdf")])
+        if not fp: return
+        pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial",size=10)
+        headers = [tree.heading(c)["text"] for c in tree["columns"]]
+        widths = [pdf.w/len(headers)]*len(headers)
+        for h,w in zip(headers,widths):
+            pdf.cell(w,8,txt=h,border=1)
+        pdf.ln()
+        for iid in items:
+            for val,w in zip(tree.item(iid)["values"],widths):
+                pdf.cell(w,8,txt=str(val),border=1)
+            pdf.ln()
+        pdf.output(fp)
+        messagebox.showinfo("Éxito",f"PDF generado en {fp}")
+
+    # 2. Pestaña de gráficas
+    def crear_pestaña_graficas(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="Gráficas")
+
+        op = ttk.LabelFrame(tab, text="Opciones", padding=10)
+        op.pack(fill=tk.X, pady=5)
+        ttk.Label(op, text="Tipo:").grid(row=0,column=0,padx=5)
+        self.gg_tipo = ttk.Combobox(op, values=["Reservas por día","Ingresos por cancha","Uso de servicios","Estado de reservas"], state="readonly")
+        self.gg_tipo.set("Reservas por día"); self.gg_tipo.grid(row=0,column=1,padx=5)
+        ttk.Label(op, text="Fecha inicio:").grid(row=0,column=2,padx=5)
+        self.gg_fi = DateEntry(op, date_pattern='yyyy-mm-dd'); self.gg_fi.grid(row=0,column=3)
+        ttk.Label(op, text="Fecha fin:").grid(row=0,column=4,padx=5)
+        self.gg_ff = DateEntry(op, date_pattern='yyyy-mm-dd'); self.gg_ff.grid(row=0,column=5)
+        ttk.Button(op, text="Generar", command=self._gen_grafico).grid(row=0,column=6,padx=10)
+
+        self.gg_frame = ttk.Frame(tab); self.gg_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _gen_grafico(self):
+        for wid in self.gg_frame.winfo_children(): wid.destroy()
+        fig = plt.Figure(figsize=(8,6), dpi=100); ax = fig.add_subplot(111)
+        f1, f2 = self.gg_fi.get_date(), self.gg_ff.get_date()
+        tipo = self.gg_tipo.get()
+        if tipo=="Reservas por día":
+            q = "SELECT fecha, COUNT(*) FROM reserva WHERE fecha BETWEEN %s AND %s GROUP BY fecha ORDER BY fecha"
+            self.cursor.execute(q,(f1,f2))
+            fechas, vals = zip(*self.cursor.fetchall() or [([],[])])
+            ax.bar(fechas, vals); ax.set_title(tipo)
+        elif tipo=="Ingresos por cancha":
+            q = """SELECT c.nombre, SUM(p.total) FROM reserva r
+                   JOIN cancha c ON r.id_cancha=c.id
+                   JOIN pago p ON p.id_reserva=r.id
+                   WHERE r.fecha BETWEEN %s AND %s GROUP BY c.nombre"""
+            self.cursor.execute(q,(f1,f2))
+            names, vals = zip(*self.cursor.fetchall() or [([],[])])
+            ax.bar(names, [float(v) for v in vals]); ax.set_title(tipo)
+        elif tipo=="Uso de servicios":
+            q = """SELECT sa.descripcion, COUNT(*) FROM reserva_servicio rs
+                   JOIN servicio_adicional sa ON rs.id_servicio=sa.id
+                   JOIN reserva r ON r.id=rs.id_reserva
+                   WHERE r.fecha BETWEEN %s AND %s GROUP BY sa.descripcion"""
+            self.cursor.execute(q,(f1,f2))
+            labels, vals = zip(*self.cursor.fetchall() or [([],[])])
+            ax.pie(vals, labels=labels, autopct='%1.1f%%'); ax.set_title(tipo)
+        else:
+            q = "SELECT estado, COUNT(*) FROM reserva WHERE fecha BETWEEN %s AND %s GROUP BY estado"
+            self.cursor.execute(q,(f1,f2))
+            labels, vals = zip(*self.cursor.fetchall() or [([],[])])
+            ax.pie(vals, labels=labels, autopct='%1.1f%%'); ax.set_title(tipo)
+
+        canvas = FigureCanvasTkAgg(fig, master=self.gg_frame)
+        canvas.draw(); canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # 3. Pestaña SQL
+    def crear_pestaña_sql(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="SQL")
+        frame = ttk.LabelFrame(tab, text="Ingresar consulta", padding=10)
+        frame.pack(fill=tk.X, padx=5, pady=5)
+        self.sql_text = tk.Text(frame, height=4)
+        self.sql_text.pack(fill=tk.X, padx=5)
+        btnf = ttk.Frame(frame); btnf.pack(fill=tk.X)
+        ttk.Button(btnf, text="Ejecutar", command=self._exec_sql).pack(side=tk.LEFT,padx=5)
+        ttk.Button(btnf, text="Limpiar", command=lambda:self.sql_text.delete("1.0",tk.END)).pack(side=tk.LEFT)
+
+        self.sql_tree = ttk.Treeview(tab)
+        sb = ttk.Scrollbar(tab, command=self.sql_tree.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.sql_tree.configure(yscrollcommand=sb.set)
+        self.sql_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    def _exec_sql(self):
+        q = self.sql_text.get("1.0",tk.END).strip()
+        if not q:
+            messagebox.showwarning("Atención","Escriba una consulta")
+            return
+        try:
+            self.cursor.execute(q)
+            cols = [d[0] for d in self.cursor.description]
+            self.sql_tree["columns"] = cols
+            for c in cols:
+                self.sql_tree.heading(c,text=c); self.sql_tree.column(c,width=100)
+            for iid in self.sql_tree.get_children():
+                self.sql_tree.delete(iid)
+            for row in self.cursor.fetchall():
+                self.sql_tree.insert("",tk.END,values=row)
+        except Exception as e:
+            messagebox.showerror("Error SQL",str(e))
+
+    # --- Reportes específicos (del segundo archivo) ---
+    def ejecutar_y_mostrar(self, tree, query, params):
+        try:
+            self.conn.rollback()
+        except: pass
         try:
             self.cursor.execute(query, params)
-            resultados = self.cursor.fetchall()
-            
-
-            for item in self.reportes_tree.get_children():
-                self.reportes_tree.delete(item)
-
-            for row in resultados:
-                self.reportes_tree.insert("", tk.END, values=row)
-                
+            filas = self.cursor.fetchall()
+            for iid in tree.get_children(): tree.delete(iid)
+            for fila in filas: tree.insert("",tk.END,values=fila)
         except Exception as e:
-            messagebox.showerror("Error", f"Error al generar reporte: {str(e)}")
-    
-    def generar_grafico(self):
-        tipo = self.tipo_grafico.get()
-        fecha_inicio = self.grafico_fecha_inicio.get_date()
-        fecha_fin = self.grafico_fecha_fin.get_date()
-        
-        try:
+            messagebox.showerror("Error al generar reporte", str(e))
 
-            for widget in self.grafico_frame.winfo_children():
-                widget.destroy()
-            
-            fig = plt.Figure(figsize=(8, 6), dpi=100)
-            ax = fig.add_subplot(111)
-            
-            if tipo == "Reservas por día":
-                query = """
-                SELECT fecha, COUNT(*) 
-                FROM reserva 
-                WHERE fecha BETWEEN %s AND %s
-                GROUP BY fecha 
-                ORDER BY fecha
-                """
-                self.cursor.execute(query, (fecha_inicio, fecha_fin))
-                datos = self.cursor.fetchall()
-                
-                fechas = [d[0] for d in datos]
-                cantidades = [d[1] for d in datos]
-                
-                ax.bar(fechas, cantidades)
-                ax.set_title("Reservas por día")
-                ax.set_xlabel("Fecha")
-                ax.set_ylabel("Número de reservas")
-                fig.autofmt_xdate()
-                
-            elif tipo == "Ingresos por cancha":
-                query = """
-                SELECT c.nombre, SUM(p.total) 
-                FROM reserva r
-                JOIN cancha c ON r.id_cancha = c.id
-                JOIN pago p ON p.id_reserva = r.id
-                WHERE r.fecha BETWEEN %s AND %s
-                GROUP BY c.nombre
-                ORDER BY SUM(p.total) DESC
-                """
-                self.cursor.execute(query, (fecha_inicio, fecha_fin))
-                datos = self.cursor.fetchall()
-                
-                canchas = [d[0] for d in datos]
-                ingresos = [float(d[1]) for d in datos]
-                
-                ax.bar(canchas, ingresos)
-                ax.set_title("Ingresos por cancha")
-                ax.set_xlabel("Cancha")
-                ax.set_ylabel("Ingresos ($)")
-                fig.autofmt_xdate()
-                
-            elif tipo == "Uso de servicios":
-                query = """
-                SELECT sa.descripcion, COUNT(rs.id_servicio)
-                FROM reserva_servicio rs
-                JOIN servicio_adicional sa ON rs.id_servicio = sa.id
-                JOIN reserva r ON rs.id_reserva = r.id
-                WHERE r.fecha BETWEEN %s AND %s
-                GROUP BY sa.descripcion
-                ORDER BY COUNT(rs.id_servicio) DESC
-                """
-                self.cursor.execute(query, (fecha_inicio, fecha_fin))
-                datos = self.cursor.fetchall()
-                
-                servicios = [d[0] for d in datos]
-                usos = [d[1] for d in datos]
-                
-                ax.pie(usos, labels=servicios, autopct='%1.1f%%')
-                ax.set_title("Uso de servicios adicionales")
-                
-            elif tipo == "Estado de reservas":
-                query = """
-                SELECT estado, COUNT(*) 
-                FROM reserva 
-                WHERE fecha BETWEEN %s AND %s
-                GROUP BY estado
-                """
-                self.cursor.execute(query, (fecha_inicio, fecha_fin))
-                datos = self.cursor.fetchall()
-                
-                estados = [d[0] for d in datos]
-                cantidades = [d[1] for d in datos]
-                
-                ax.pie(cantidades, labels=estados, autopct='%1.1f%%')
-                ax.set_title("Distribución por estado de reservas")
-            
+    def crear_reporte_ingresos(self):
+        filtros, tree = self.crear_pestana_base("Ingresos por Cancha", ["cancha","total"], [300,200])
+        # filtros...
+        ttk.Label(filtros, text="Fecha inicio:").grid(row=0,column=0)
+        fi = DateEntry(filtros, date_pattern='yyyy-mm-dd'); fi.grid(row=0,column=1)
+        ttk.Label(filtros, text="Fecha fin:").grid(row=0,column=2)
+        ff = DateEntry(filtros, date_pattern='yyyy-mm-dd'); ff.grid(row=0,column=3)
+        ttk.Label(filtros, text="Cancha:").grid(row=1,column=0)
+        cb = ttk.Combobox(filtros, state="readonly"); cb.grid(row=1,column=1,columnspan=3,sticky="w")
+        # cargar canchas
+        self.cursor.execute("SELECT id,nombre FROM cancha ORDER BY nombre")
+        cb['values'] = ['Todas'] + [f"{n} (ID:{i})" for i,n in self.cursor.fetchall()]
+        ttk.Button(filtros, text="Generar", command=lambda:
+                   self._gen_ingresos(fi,ff,cb,tree)).grid(row=2,column=0,columnspan=4,pady=6)
 
-            canvas = FigureCanvasTkAgg(fig, master=self.grafico_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al generar gráfico: {str(e)}")
-    
-    def ejecutar_consulta(self):
-        consulta = self.consulta_text.get("1.0", tk.END).strip()
-        
-        if not consulta:
-            messagebox.showwarning("Advertencia", "Por favor ingrese una consulta SQL")
-            return
-        
-        try:
-            self.cursor.execute(consulta)
+    def _gen_ingresos(self, fi, ff, cb, tree):
+        f1, f2 = fi.get_date(), ff.get_date()
+        cancha = cb.get(); params=[f1,f2]
+        q = """SELECT c.nombre, SUM(p.total) FROM pago p
+               JOIN reserva r ON p.id_reserva=r.id
+               JOIN cancha c ON r.id_cancha=c.id
+               WHERE r.fecha BETWEEN %s AND %s"""
+        if cancha and cancha!="Todas":
+            cid=int(cancha.split("ID:")[1].rstrip(")")); q+=" AND c.id=%s"; params.append(cid)
+        q+=" GROUP BY c.nombre ORDER BY SUM(p.total) DESC"
+        self.ejecutar_y_mostrar(tree,q,params)
 
-            for item in self.consulta_tree.get_children():
-                self.consulta_tree.delete(item)
+    def crear_reporte_servicios(self):
+        filtros, tree = self.crear_pestana_base("Uso de Servicios", ["servicio","usos"], [300,200])
+        ttk.Label(filtros, text="Fecha inicio:").grid(row=0,column=0)
+        fi = DateEntry(filtros, date_pattern='yyyy-mm-dd'); fi.grid(row=0,column=1)
+        ttk.Label(filtros, text="Fecha fin:").grid(row=0,column=2)
+        ff = DateEntry(filtros, date_pattern='yyyy-mm-dd'); ff.grid(row=0,column=3)
+        ttk.Label(filtros, text="Servicio:").grid(row=1,column=0)
+        scb = ttk.Combobox(filtros, state="readonly"); scb.grid(row=1,column=1)
+        ttk.Label(filtros, text="Usuario ID:").grid(row=1,column=2)
+        usr = ttk.Entry(filtros); usr.grid(row=1,column=3)
+        ttk.Label(filtros, text="Cancha:").grid(row=2,column=0)
+        ccb = ttk.Combobox(filtros, state="readonly"); ccb.grid(row=2,column=1)
+        # valores
+        self.cursor.execute("SELECT id,descripcion FROM servicio_adicional")
+        scb['values'] = ['Todos'] + [f"{d} (ID:{i})" for i,d in self.cursor.fetchall()]
+        self.cursor.execute("SELECT id,nombre FROM cancha")
+        ccb['values'] = ['Todas'] + [f"{n} (ID:{i})" for i,n in self.cursor.fetchall()]
+        ttk.Button(filtros, text="Generar", command=lambda:
+                   self._gen_servicios(fi,ff,scb,usr,ccb,tree)).grid(row=3,column=0,columnspan=4,pady=6)
 
-            columnas = [desc[0] for desc in self.cursor.description]
-            self.consulta_tree["columns"] = columnas
-  
-            for col in columnas:
-                self.consulta_tree.heading(col, text=col)
-                self.consulta_tree.column(col, width=100)
-      
-            for row in self.cursor.fetchall():
-                self.consulta_tree.insert("", tk.END, values=row)
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al ejecutar consulta: {str(e)}")
-    
-    def limpiar_consulta(self):
-        self.consulta_text.delete("1.0", tk.END)
-        for item in self.consulta_tree.get_children():
-            self.consulta_tree.delete(item)
-    
-    def exportar_a_csv(self):
-  
-            items = self.reportes_tree.get_children()
-            if not items:
-                messagebox.showwarning("Advertencia", "No hay datos para exportar")
-                return
-            
-            # Pedir al usuario dónde guardar el archivo
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("Archivos CSV", "*.csv"), ("Todos los archivos", "*.*")],
-                title="Guardar como CSV"
-            )
-            
-            if not filepath:  #por si ya no se quiere exportar
-                return
-            
-            try:
-                with open(filepath, mode='w', newline='', encoding='utf-8') as file:
-                    writer = csv.writer(file)
+    def _gen_servicios(self, fi, ff, scb, usr, ccb, tree):
+        f1, f2 = fi.get_date(), ff.get_date()
+        params=[f1,f2]; q = """SELECT sa.descripcion, COUNT(*) FROM reserva_servicio rs
+                 JOIN servicio_adicional sa ON rs.id_servicio=sa.id
+                 JOIN reserva r ON r.id=rs.id_reserva
+                 WHERE r.fecha BETWEEN %s AND %s"""
+        if scb.get()!="Todos":
+            sid=int(scb.get().split("ID:")[1].rstrip(")")); q+=" AND sa.id=%s"; params.append(sid)
+        if usr.get().strip():
+            q+=" AND r.id_usuario=%s"; params.append(int(usr.get().strip()))
+        if ccb.get()!="Todas":
+            cid=int(ccb.get().split("ID:")[1].rstrip(")")); q+=" AND r.id_cancha=%s"; params.append(cid)
+        q+=" GROUP BY sa.descripcion ORDER BY COUNT(*) DESC"
+        self.ejecutar_y_mostrar(tree,q,params)
 
-                    headers = [self.reportes_tree.heading(col)['text'] for col in self.reportes_tree['columns']]
-                    writer.writerow(headers)
-                    
+    def crear_reporte_por_usuario(self):
+        filtros, tree = self.crear_pestana_base("Reservas por Usuario", ["id","fecha","inicio","fin","estado"], [80,120,120,120,120])
+        ttk.Label(filtros, text="Usuario ID:").grid(row=0,column=0)
+        uid = ttk.Entry(filtros); uid.grid(row=0,column=1)
+        ttk.Label(filtros, text="Fecha inicio:").grid(row=0,column=2)
+        fi = DateEntry(filtros, date_pattern='yyyy-mm-dd'); fi.grid(row=0,column=3)
+        ttk.Label(filtros, text="Fecha fin:").grid(row=1,column=0)
+        ff = DateEntry(filtros, date_pattern='yyyy-mm-dd'); ff.grid(row=1,column=1)
+        ttk.Label(filtros, text="Estado:").grid(row=1,column=2)
+        est = ttk.Combobox(filtros, state="readonly", values=["Todas","pendiente","confirmada","cancelada"]); est.grid(row=1,column=3)
+        ttk.Label(filtros, text="Cancha:").grid(row=2,column=0)
+        cb  = ttk.Combobox(filtros, state="readonly"); cb.grid(row=2,column=1)
+        self.cursor.execute("SELECT id,nombre FROM cancha")
+        cb['values'] = ['Todas'] + [f"{n} (ID:{i})" for i,n in self.cursor.fetchall()]
+        ttk.Button(filtros, text="Generar", command=lambda:
+                   self._gen_usuario(uid,fi,ff,est,cb,tree)).grid(row=3,column=0,columnspan=4,pady=6)
 
-                    for item in items:
-                        row = self.reportes_tree.item(item)['values']
-                        writer.writerow(row)
-                
-                messagebox.showinfo("Éxito", f"Datos exportados correctamente a:\n{filepath}")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo exportar a CSV: {str(e)}")
-        
-    def exportar_a_pdf(self):
+    def _gen_usuario(self, uid, fi, ff, est, cb, tree):
+        params=[]; q="""SELECT r.id,r.fecha,r.hora_inicio AS inicio,r.hora_fin AS fin,r.estado
+               FROM reserva r WHERE 1=1"""
+        if uid.get().strip():
+            q+=" AND r.id_usuario=%s"; params.append(int(uid.get().strip()))
+        q+=" AND r.fecha BETWEEN %s AND %s"; params += [fi.get_date(), ff.get_date()]
+        if est.get()!="Todas":
+            q+=" AND r.estado=%s"; params.append(est.get())
+        if cb.get()!="Todas":
+            cid=int(cb.get().split("ID:")[1].rstrip(")")); q+=" AND r.id_cancha=%s"; params.append(cid)
+        q+=" ORDER BY r.fecha"
+        self.ejecutar_y_mostrar(tree,q,params)
 
-            items = self.reportes_tree.get_children()
-            if not items:
-                messagebox.showwarning("Advertencia", "No hay datos para exportar")
-                return
-            
-            # Pedir al usuario dónde guardar el archivo
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".pdf",
-                filetypes=[("Archivos PDF", "*.pdf"), ("Todos los archivos", "*.*")],
-                title="Guardar como PDF"
-            )
-            
-            if not filepath:
-                return
-            
-            try:
-                # Crear PDF
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Arial", size=12)
-                
-                # Título del reporte
-                pdf.cell(200, 10, txt="Reporte de Reservas", ln=1, align='C')
-                
-                # Fechas del reporte
-                fecha_inicio = self.fecha_inicio.get_date().strftime("%d/%m/%Y")
-                fecha_fin = self.fecha_fin.get_date().strftime("%d/%m/%Y")
-                pdf.cell(200, 10, txt=f"Desde: {fecha_inicio} - Hasta: {fecha_fin}", ln=1, align='C')
-                
-                # Estado filtrado
-                estado = self.estado_reserva.get()
-                if estado != "Todos":
-                    pdf.cell(200, 10, txt=f"Estado: {estado.capitalize()}", ln=1, align='C')
-                
-                pdf.ln(10) 
-                
-                # Encabezados de la tabla
-                headers = [self.reportes_tree.heading(col)['text'] for col in self.reportes_tree['columns']]
-                col_widths = [30, 40, 40, 25, 25, 25, 25, 30, 25] 
-                
-                # Configurar fuente para la tabla
-                pdf.set_font("Arial", size=10)
-                
-              
-                for i, header in enumerate(headers):
-                    pdf.cell(col_widths[i], 10, txt=header, border=1)
-                pdf.ln()
-                
+    def crear_reporte_duracion(self):
+        filtros, tree = self.crear_pestana_base("Duración de Reservas", ["id","duracion","fecha"], [80,120,120])
+        ttk.Label(filtros, text="Min. (h):").grid(row=0,column=0)
+        dmin = ttk.Spinbox(filtros, from_=0,to=24,width=5); dmin.grid(row=0,column=1)
+        ttk.Label(filtros, text="Max. (h):").grid(row=0,column=2)
+        dmax = ttk.Spinbox(filtros, from_=0,to=24,width=5); dmax.grid(row=0,column=3)
+        ttk.Label(filtros, text="Fecha inicio:").grid(row=1,column=0)
+        fi = DateEntry(filtros, date_pattern='yyyy-mm-dd'); fi.grid(row=1,column=1)
+        ttk.Label(filtros, text="Fecha fin:").grid(row=1,column=2)
+        ff = DateEntry(filtros, date_pattern='yyyy-mm-dd'); ff.grid(row=1,column=3)
+        ttk.Label(filtros, text="Cancha:").grid(row=2,column=0)
+        cb = ttk.Combobox(filtros, state="readonly"); cb.grid(row=2,column=1)
+        self.cursor.execute("SELECT id,nombre FROM cancha")
+        cb['values'] = ['Todas'] + [f"{n} (ID:{i})" for i,n in self.cursor.fetchall()]
+        ttk.Button(filtros, text="Generar", command=lambda:
+                   self._gen_duracion(dmin,dmax,fi,ff,cb,tree)).grid(row=3,column=0,columnspan=4,pady=6)
 
-                for item in items:
-                    row = self.reportes_tree.item(item)['values']
-                    for i, value in enumerate(row):
-                        pdf.cell(col_widths[i], 10, txt=str(value), border=1)
-                    pdf.ln()
+    def _gen_duracion(self, dmin, dmax, fi, ff, cb, tree):
+        q = """SELECT r.id,r.duracion,r.fecha FROM reserva r
+               WHERE r.duracion BETWEEN %s AND %s
+                 AND r.fecha BETWEEN %s AND %s"""
+        params = [float(dmin.get()), float(dmax.get()), fi.get_date(), ff.get_date()]
+        if cb.get()!="Todas":
+            cid=int(cb.get().split("ID:")[1].rstrip(")")); q+=" AND r.id_cancha=%s"; params.append(cid)
+        self.ejecutar_y_mostrar(tree,q,params)
 
-                pdf.output(filepath)
-                messagebox.showinfo("Éxito", f"Reporte generado correctamente en:\n{filepath}")
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo generar el PDF: {str(e)}")
+    def crear_reporte_comparativo_mensual(self):
+        filtros, tree = self.crear_pestana_base("Comparativo Mensual", ["mes","total"], [120,200])
+        ttk.Label(filtros, text="Mes:").grid(row=0,column=0)
+        mes = ttk.Spinbox(filtros, from_=1,to=12,width=5); mes.grid(row=0,column=1)
+        ttk.Label(filtros, text="Año:").grid(row=0,column=2)
+        anio= ttk.Spinbox(filtros, from_=2020,to=2030,width=5); anio.grid(row=0,column=3)
+        ttk.Label(filtros, text="Cancha:").grid(row=1,column=0)
+        cb = ttk.Combobox(filtros, state="readonly"); cb.grid(row=1,column=1)
+        ttk.Label(filtros, text="Usuario ID:").grid(row=1,column=2)
+        usr = ttk.Entry(filtros); usr.grid(row=1,column=3)
+        ttk.Label(filtros, text="Estado:").grid(row=2,column=0)
+        est = ttk.Combobox(filtros, state="readonly", values=["Todas","pendiente","confirmada","cancelada"]); est.grid(row=2,column=1)
+        self.cursor.execute("SELECT id,nombre FROM cancha")
+        cb['values'] = ['Todas'] + [f"{n} (ID:{i})" for i,n in self.cursor.fetchall()]
+        ttk.Button(filtros, text="Generar", command=lambda:
+                   self._gen_comparativo(mes,anio,cb,usr,est,tree)).grid(row=3,column=0,columnspan=4,pady=6)
+
+    def _gen_comparativo(self, mes, anio, cb, usr, est, tree):
+        m,y = int(mes.get()), int(anio.get())
+        q = """SELECT EXTRACT(MONTH FROM fecha) AS mes, COUNT(*) AS total
+               FROM reserva r
+               WHERE EXTRACT(MONTH FROM fecha)=%s
+                 AND EXTRACT(YEAR FROM fecha)=%s"""
+        params = [m,y]
+        if cb.get()!="Todas":
+            cid=int(cb.get().split("ID:")[1].rstrip(")")); q+=" AND r.id_cancha=%s"; params.append(cid)
+        if usr.get().strip():
+            q+=" AND r.id_usuario=%s"; params.append(int(usr.get().strip()))
+        if est.get()!="Todas":
+            q+=" AND r.estado=%s"; params.append(est.get())
+        q+=" GROUP BY mes ORDER BY mes"
+        self.ejecutar_y_mostrar(tree,q,params)
+
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = ReportesEmpresaApp(root)
+    app = MergedReportApp(root)
     root.mainloop()
